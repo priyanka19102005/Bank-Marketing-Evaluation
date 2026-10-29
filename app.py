@@ -1,4 +1,5 @@
 import os
+import io
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -13,7 +14,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.tree import DecisionTreeClassifier, plot_tree
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -24,7 +25,9 @@ from sklearn.metrics import (
     roc_curve
 )
 
-# Page configuration
+# -------------------------------------------------------------
+# Page Configuration
+# -------------------------------------------------------------
 st.set_page_config(
     page_title="Bank Marketing Evaluation & Prediction",
     page_icon="🏦",
@@ -32,7 +35,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# -------------------------------------------------------------
 # Custom Styling
+# -------------------------------------------------------------
 st.markdown("""
 <style>
     .main-header {
@@ -42,44 +47,55 @@ st.markdown("""
         margin-bottom: 0.2rem;
     }
     .sub-header {
-        font-size: 1.1rem;
+        font-size: 1.05rem;
         color: #4B5563;
         margin-bottom: 1.5rem;
     }
     .metric-card {
-        background: #F3F4F6;
+        background: #F8FAFC;
         border-radius: 8px;
         padding: 1rem;
         border-left: 4px solid #2563EB;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
     }
 </style>
 """, unsafe_allow_html=True)
 
 
-# Data & Model Training with caching
+# -------------------------------------------------------------
+# Data Loading & Training (Cached)
+# -------------------------------------------------------------
 @st.cache_resource
-def load_and_train_models():
-    # Look for bank_marketing.csv in script directory or current directory
-    possible_paths = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "bank_marketing.csv"),
-        "bank_marketing.csv",
-        os.path.join(os.getcwd(), "bank_marketing.csv")
-    ]
-    file_path = None
-    for p in possible_paths:
-        if os.path.exists(p):
-            file_path = p
-            break
+def load_and_train_models(custom_csv_bytes=None):
+    if custom_csv_bytes is not None:
+        df = pd.read_csv(io.BytesIO(custom_csv_bytes))
+    else:
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "bank_marketing.csv"),
+            "bank_marketing.csv",
+            os.path.join(os.getcwd(), "bank_marketing.csv")
+        ]
+        file_path = None
+        for p in possible_paths:
+            if os.path.exists(p):
+                file_path = p
+                break
 
-    if file_path is None:
-        raise FileNotFoundError("bank_marketing.csv not found in repository.")
+        if file_path is None:
+            raise FileNotFoundError("bank_marketing.csv not found in repository root or script directory.")
 
-    df = pd.read_csv(file_path, sep=None, engine="python")
+        try:
+            df = pd.read_csv(file_path)
+        except Exception:
+            df = pd.read_csv(file_path, sep=None, engine="python")
+
+    # Clean column names
     df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_").str.replace(".", "_")
 
+    # Target column mapping
     target_col = "y" if "y" in df.columns else df.columns[-1]
     df[target_col] = df[target_col].astype(str).str.strip().str.lower()
-    df[target_col] = df[target_col].map({"yes": 1, "no": 0, "1": 1, "0": 0}).fillna(0).astype(int)
+    df[target_col] = df[target_col].map({"yes": 1, "no": 0, "1": 1, "0": 0, "true": 1, "false": 0}).fillna(0).astype(int)
 
     X = df.drop(columns=[target_col])
     y = df[target_col]
@@ -98,7 +114,7 @@ def load_and_train_models():
         ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("encoder", OneHotEncoder(handle_unknown="ignore"))]), cat_cols)
     ])
 
-    # Pipelines
+    # Model Pipelines
     lr_pipe = Pipeline([
         ("prep", preprocessor_lr),
         ("clf", LogisticRegression(max_iter=1000, random_state=42))
@@ -111,20 +127,28 @@ def load_and_train_models():
 
     best_dt_pipe = Pipeline([
         ("prep", preprocessor_dt),
-        ("clf", DecisionTreeClassifier(max_depth=5, min_samples_split=5, min_samples_leaf=2, criterion="gini", random_state=42))
+        ("clf", DecisionTreeClassifier(
+            max_depth=5,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            criterion="gini",
+            random_state=42
+        ))
     ])
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    # Train / Test split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y if len(np.unique(y)) > 1 else None
+    )
 
     lr_pipe.fit(X_train, y_train)
     dt_pipe.fit(X_train, y_train)
     best_dt_pipe.fit(X_train, y_train)
 
-    # Evaluate models
     models_dict = {
-        "Logistic Regression": lr_pipe,
+        "Tuned Decision Tree": best_dt_pipe,
         "Decision Tree": dt_pipe,
-        "Tuned Decision Tree": best_dt_pipe
+        "Logistic Regression": lr_pipe
     }
 
     eval_results = []
@@ -138,9 +162,9 @@ def load_and_train_models():
         prec = precision_score(y_test, y_pred, zero_division=0)
         rec = recall_score(y_test, y_pred, zero_division=0)
         f1 = f1_score(y_test, y_pred, zero_division=0)
-        roc = roc_auc_score(y_test, y_prob)
+        roc = roc_auc_score(y_test, y_prob) if len(np.unique(y_test)) > 1 else 0.5
         cm = confusion_matrix(y_test, y_pred)
-        fpr, tpr, _ = roc_curve(y_test, y_prob)
+        fpr, tpr, _ = roc_curve(y_test, y_prob) if len(np.unique(y_test)) > 1 else ([0, 1], [0, 1], None)
 
         eval_results.append({
             "Model": name,
@@ -154,72 +178,86 @@ def load_and_train_models():
         roc_data[name] = (fpr, tpr, roc)
 
     eval_df = pd.DataFrame(eval_results)
-    return df, X, y, models_dict, eval_df, roc_data, X_test, y_test
+    return df, X, y, models_dict, eval_df, roc_data, X_test, y_test, num_cols, cat_cols
 
+
+# -------------------------------------------------------------
+# Sidebar Configuration
+# -------------------------------------------------------------
+st.sidebar.image("https://cdn-icons-png.flaticon.com/512/2830/2830284.png", width=70)
+st.sidebar.title("Bank Marketing AI")
+st.sidebar.markdown("Predict term deposit subscriptions & explore marketing campaign performance.")
+
+uploaded_file = st.sidebar.file_uploader("Upload custom CSV (Optional)", type=["csv"])
+custom_bytes = uploaded_file.getvalue() if uploaded_file is not None else None
 
 try:
-    df, X, y, models, eval_df, roc_data, X_test, y_test = load_and_train_models()
+    df, X, y, models, eval_df, roc_data, X_test, y_test, num_cols, cat_cols = load_and_train_models(custom_bytes)
 except Exception as e:
-    st.error(f"Error initializing models or loading dataset: {e}")
+    st.error(f"❌ Error initializing models or loading dataset: {e}")
+    st.info("Ensure `bank_marketing.csv` is present in the repository root.")
     st.stop()
 
+st.sidebar.success(f"✓ Dataset loaded: {df.shape[0]:,} records")
 
-# Navigation Tabs
-st.markdown('<div class="main-header">🏦 Bank Marketing Campaign & Term Deposit Predictor</div>', unsafe_allow_html=True)
+# -------------------------------------------------------------
+# Main Header
+# -------------------------------------------------------------
+st.markdown('<div class="main-header">🏦 Bank Marketing Evaluation & Term Deposit Predictor</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Analyze marketing campaign efficiency, evaluate machine learning models, and predict customer deposit subscriptions in real-time.</div>', unsafe_allow_html=True)
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "🎯 Real-Time Customer Prediction",
     "📊 Model Evaluation & Comparison",
-    "📈 Dataset & Campaign Insights"
+    "📈 Dataset & Campaign Insights",
+    "📁 Batch CSV Prediction"
 ])
 
-
-# ============================================================
-# TAB 1: Real-Time Prediction
-# ============================================================
+# =============================================================
+# TAB 1: Single Prediction
+# =============================================================
 with tab1:
     st.subheader("Predict Customer Term Deposit Subscription")
-    st.write("Fill in the customer information and marketing campaign details below:")
+    st.write("Select a model and fill in customer details below to generate a subscription probability prediction:")
 
-    col_model, col_blank = st.columns([2, 2])
+    col_model, _ = st.columns([2, 2])
     with col_model:
         selected_model_name = st.selectbox(
-            "Select Prediction Model",
-            options=["Tuned Decision Tree", "Decision Tree", "Logistic Regression"],
+            "Select Machine Learning Model",
+            options=list(models.keys()),
             index=0,
-            help="Tuned Decision Tree is optimized with hyperparameter constraints to prevent overfitting."
+            help="Tuned Decision Tree is constrained (max_depth=5) to balance accuracy and generalizability."
         )
 
     st.markdown("---")
-    
-    with st.form("prediction_form"):
-        col1, col2, col3 = st.columns(3)
 
-        with col1:
+    with st.form("prediction_form"):
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
             st.markdown("##### 👤 Customer Profile")
             age = st.number_input("Age", min_value=18, max_value=100, value=35)
-            job = st.selectbox("Job", options=sorted(df["job"].dropna().unique().tolist()), index=0)
-            marital = st.selectbox("Marital Status", options=sorted(df["marital"].dropna().unique().tolist()))
-            education = st.selectbox("Education Level", options=sorted(df["education"].dropna().unique().tolist()))
+            job = st.selectbox("Job", options=sorted(df["job"].dropna().unique().tolist()) if "job" in df.columns else ["admin."], index=0)
+            marital = st.selectbox("Marital Status", options=sorted(df["marital"].dropna().unique().tolist()) if "marital" in df.columns else ["married"])
+            education = st.selectbox("Education Level", options=sorted(df["education"].dropna().unique().tolist()) if "education" in df.columns else ["secondary"])
             default = st.selectbox("Has Credit in Default?", options=["no", "yes"])
 
-        with col2:
+        with c2:
             st.markdown("##### 💰 Financial & Account Info")
             balance = st.number_input("Average Yearly Balance (EUR)", min_value=-10000, max_value=150000, value=1500)
             housing = st.selectbox("Has Housing Loan?", options=["yes", "no"])
             loan = st.selectbox("Has Personal Loan?", options=["no", "yes"])
-            contact = st.selectbox("Contact Communication Type", options=sorted(df["contact"].dropna().unique().tolist()))
+            contact = st.selectbox("Contact Communication Type", options=sorted(df["contact"].dropna().unique().tolist()) if "contact" in df.columns else ["cellular"])
             day = st.slider("Last Contact Day of Month", min_value=1, max_value=31, value=15)
             month = st.selectbox("Last Contact Month", options=["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], index=4)
 
-        with col3:
+        with c3:
             st.markdown("##### 📞 Campaign Details")
-            duration = st.number_input("Last Contact Duration (seconds)", min_value=0, max_value=5000, value=250, help="High duration strongly correlates with conversion.")
+            duration = st.number_input("Last Contact Duration (seconds)", min_value=0, max_value=5000, value=250, help="Duration of last call. Strong correlation with conversion.")
             campaign = st.number_input("Number of Contacts during this Campaign", min_value=1, max_value=60, value=1)
             pdays = st.number_input("Days Since Previous Contact (-1 = never)", min_value=-1, max_value=1000, value=-1)
             previous = st.number_input("Number of Contacts Before this Campaign", min_value=0, max_value=100, value=0)
-            poutcome = st.selectbox("Outcome of Previous Marketing Campaign", options=sorted(df["poutcome"].dropna().unique().tolist()))
+            poutcome = st.selectbox("Outcome of Previous Campaign", options=sorted(df["poutcome"].dropna().unique().tolist()) if "poutcome" in df.columns else ["unknown"])
 
         submit_btn = st.form_submit_button("🔮 Predict Term Deposit Subscription", use_container_width=True)
 
@@ -245,36 +283,37 @@ with tab1:
 
         active_model = models[selected_model_name]
         pred = active_model.predict(input_data)[0]
-        prob = active_model.predict_proba(input_data)[0][1] if hasattr(active_model, "predict_proba") else (1.0 if pred == 1 else 0.0)
+        prob_raw = active_model.predict_proba(input_data)[0][1] if hasattr(active_model, "predict_proba") else (1.0 if pred == 1 else 0.0)
+        prob = float(np.clip(prob_raw, 0.0, 1.0))
 
-        st.markdown("### 📋 Prediction Result")
+        st.markdown("### 📋 Prediction Outcome")
         res_col1, res_col2 = st.columns([1, 1])
 
         with res_col1:
             if pred == 1:
-                st.success("### 🎉 Result: **Subscribed (YES)**")
-                st.write(f"The model predicts with **{prob * 100:.1f}% confidence** that this customer is likely to subscribe to the term deposit.")
+                st.success("### 🎉 Prediction: **Subscribed (YES)**")
+                st.write(f"The model predicts with **{prob * 100:.1f}% probability** that this customer will subscribe to the term deposit.")
             else:
-                st.warning("### ❌ Result: **Not Subscribed (NO)**")
-                st.write(f"The model predicts with **{(1 - prob) * 100:.1f}% confidence** that this customer is unlikely to subscribe.")
+                st.warning("### ❌ Prediction: **Not Subscribed (NO)**")
+                st.write(f"The model predicts with **{(1 - prob) * 100:.1f}% probability** that this customer will NOT subscribe.")
 
         with res_col2:
             st.metric(label="Subscription Probability", value=f"{prob * 100:.1f}%")
-            st.progress(float(prob))
+            st.progress(prob)
 
-
-# ============================================================
+# =============================================================
 # TAB 2: Model Comparison & Evaluation
-# ============================================================
+# =============================================================
 with tab2:
     st.subheader("Model Performance Comparison")
-    
+    st.write("Evaluation metrics computed on 20% hold-out stratified test set:")
+
     display_df = eval_df[["Model", "Accuracy", "Precision", "Recall", "F1 Score", "ROC-AUC"]].copy()
     st.dataframe(display_df.style.format({
-        "Accuracy": "{:.3%}",
-        "Precision": "{:.3%}",
-        "Recall": "{:.3%}",
-        "F1 Score": "{:.3%}",
+        "Accuracy": "{:.2%}",
+        "Precision": "{:.2%}",
+        "Recall": "{:.2%}",
+        "F1 Score": "{:.2%}",
         "ROC-AUC": "{:.3f}"
     }), use_container_width=True)
 
@@ -292,7 +331,7 @@ with tab2:
         plt.close(fig_bar)
 
     with col_chart2:
-        st.markdown("##### 📈 ROC Curves")
+        st.markdown("##### 📈 Receiver Operating Characteristic (ROC) Curves")
         fig_roc, ax_roc = plt.subplots(figsize=(6, 4))
         for model_name, (fpr, tpr, roc_score) in roc_data.items():
             ax_roc.plot(fpr, tpr, label=f"{model_name} (AUC = {roc_score:.3f})")
@@ -307,7 +346,7 @@ with tab2:
 
     st.markdown("---")
     st.markdown("##### 🧮 Confusion Matrices")
-    cm_cols = st.columns(3)
+    cm_cols = st.columns(len(eval_df))
     for idx, row in eval_df.iterrows():
         with cm_cols[idx]:
             st.markdown(f"**{row['Model']}**")
@@ -320,17 +359,16 @@ with tab2:
             st.pyplot(fig_cm)
             plt.close(fig_cm)
 
-
-# ============================================================
-# TAB 3: Dataset & Campaign Insights
-# ============================================================
+# =============================================================
+# TAB 3: Dataset Insights
+# =============================================================
 with tab3:
     st.subheader("Bank Marketing Dataset Exploration")
-    
+
     col_d1, col_d2, col_d3 = st.columns(3)
     col_d1.metric("Total Records", f"{df.shape[0]:,}")
-    col_d2.metric("Total Features", f"{df.shape[1] - 1}")
-    sub_pct = (df["y"].mean() * 100)
+    col_d2.metric("Features Count", f"{df.shape[1] - 1}")
+    sub_pct = (df["y"].mean() * 100) if "y" in df.columns else 0.0
     col_d3.metric("Deposit Subscription Rate", f"{sub_pct:.1f}%")
 
     st.markdown("##### Sample Dataset Records")
@@ -353,10 +391,48 @@ with tab3:
     with col_e2:
         st.markdown("##### Subscription Rate by Job Category")
         fig_job, ax_job = plt.subplots(figsize=(6, 3.5))
-        job_sub = df.groupby("job")["y"].mean().sort_values(ascending=False).reset_index()
-        sns.barplot(data=job_sub, x="y", y="job", hue="job", palette="viridis", legend=False, ax=ax_job)
-        ax_job.set_xlabel("Subscription Rate")
-        ax_job.set_ylabel("")
+        if "job" in df.columns:
+            job_sub = df.groupby("job")["y"].mean().sort_values(ascending=False).reset_index()
+            sns.barplot(data=job_sub, x="y", y="job", hue="job", palette="viridis", legend=False, ax=ax_job)
+            ax_job.set_xlabel("Subscription Rate")
+            ax_job.set_ylabel("")
         plt.tight_layout()
         st.pyplot(fig_job)
         plt.close(fig_job)
+
+# =============================================================
+# TAB 4: Batch CSV Prediction
+# =============================================================
+with tab4:
+    st.subheader("Batch Prediction from CSV File")
+    st.write("Upload a CSV file containing multiple customer records to generate predictions in bulk.")
+
+    batch_file = st.file_uploader("Upload Batch CSV", type=["csv"], key="batch_uploader")
+    if batch_file is not None:
+        try:
+            batch_df = pd.read_csv(batch_file)
+            batch_df.columns = batch_df.columns.str.strip().str.lower().str.replace(" ", "_").str.replace(".", "_")
+
+            batch_model = models["Tuned Decision Tree"]
+            preds = batch_model.predict(batch_df)
+            probs = batch_model.predict_proba(batch_df)[:, 1] if hasattr(batch_model, "predict_proba") else preds
+
+            result_df = batch_df.copy()
+            result_df["predicted_subscription"] = preds
+            result_df["subscription_probability"] = np.round(probs, 4)
+            result_df["prediction_label"] = result_df["predicted_subscription"].map({1: "Yes", 0: "No"})
+
+            st.success(f"✓ Successfully generated predictions for {len(result_df)} records!")
+            st.dataframe(result_df.head(20), use_container_width=True)
+
+            csv_buffer = io.StringIO()
+            result_df.to_csv(csv_buffer, index=False)
+            st.download_button(
+                label="📥 Download Predictions CSV",
+                data=csv_buffer.getvalue(),
+                file_name="bank_marketing_predictions.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        except Exception as err:
+            st.error(f"Error processing batch CSV: {err}")
